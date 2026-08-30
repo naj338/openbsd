@@ -1,1 +1,0 @@
-# openBSD-xmonad-script

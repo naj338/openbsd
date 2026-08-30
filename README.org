@@ -1,0 +1,8 @@
+* Description
+- Uses st, dmenu, xmobar, xmonad, and xenodm
+- All apps themed with haskell colors & custom font
+
+* How to
+1. Download the file using git or wget
+2. Run:
+=doas sh openbsd-xmonad-setup.sh -u YOURUSERNAME -m [DISPLAY CONFIGURATION (OPTIONAL)]= 
