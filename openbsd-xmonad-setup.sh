@@ -1,4 +1,3 @@
-Rrr
 #!/bin/sh
 #
 # openbsd-xmonad-setup.sh
@@ -214,7 +213,7 @@ if [ "$SKIP_PKGS" -eq 0 ]; then
 	done
 	# picom is what makes the terminal transparency work at all; the rest
 	# degrade gracefully if a package is missing.
-	for p in picom xmobar xwallpaper dejavu-fonts; do
+	for p in picom xmobar xwallpaper; do
 		add_pkg "$p" || warn "optional package $p was not installed"
 	done
 	# pkg_add can report success and still leave nothing on PATH, so check
@@ -336,12 +335,12 @@ ST_PATCHED=0
 FETCH_DIR=""
 FETCH_VER=""
 
-fetch_suckless() {   # fetch_suckless <project> <versions...>; sets FETCH_DIR
-	proj="$1"; shift
+fetch_suckless() {   # <project> <download subdir> <versions...>; sets FETCH_DIR
+	proj="$1"; sub="$2"; shift 2
 	FETCH_DIR=""; FETCH_VER=""
 	for v in "$@"; do
 		if ftp -V -o "$SRC_ROOT/$proj-$v.tar.gz" \
-			"https://dl.suckless.org/$proj/$proj-$v.tar.gz" >/dev/null 2>&1
+			"https://dl.suckless.org/$sub/$proj-$v.tar.gz" >/dev/null 2>&1
 		then
 			rm -rf "$SRC_ROOT/$proj-$v"
 			( cd "$SRC_ROOT" && tar zxf "$proj-$v.tar.gz" ) || continue
@@ -376,19 +375,20 @@ fetch_patch() {   # fetch_patch <url-dir> <name-regex> <destination> [version]
 # Swap one array in a suckless config.h for our own, in place.  Replacing
 # rather than deleting-and-reinserting means no dependence on whatever
 # happens to follow the array in that particular release.
-replace_block() {   # <file> <declaration-regex> <block-file>
+replace_block() {   # <file> <literal declaration prefix> <block-file>
 	awk -v decl="$2" -v blk="$3" '
-		$0 ~ decl && !done {
+		index($0, decl) == 1 && !done {
 			while ((getline line < blk) > 0) print line
 			done = 1
 			# guard against a one-line array: do not eat the next one
-			if ($0 !~ /};/) skip = 1
+			if (index($0, "};") == 0) skip = 1
 			next
 		}
-		skip && /^};/ { skip = 0; next }
+		skip && $0 ~ /^};/ { skip = 0; next }
 		skip { next }
 		{ print }
-	' "$1" >"$1.new" && mv "$1.new" "$1"
+	' "$1" >"$1.new" && mv "$1.new" "$1" ||
+		warn "could not rewrite $1 (looked for: $2)"
 }
 
 if [ "$SKIP_SRC" -eq 0 ]; then
@@ -398,7 +398,7 @@ if [ "$SKIP_SRC" -eq 0 ]; then
 
 	# ---- st -------------------------------------------------------------
 	msg "building st from source"
-	if fetch_suckless st 0.9.3 0.9.2 0.9.1 0.9; then
+	if fetch_suckless st st 0.9.3 0.9.2 0.9.1 0.9; then
 		ST_DIR="$FETCH_DIR"
 		if fetch_patch "https://st.suckless.org/patches/alpha/" \
 			"st-alpha-[0-9]" "$SRC_ROOT/st-alpha.diff" "$FETCH_VER"
@@ -410,7 +410,7 @@ if [ "$SKIP_SRC" -eq 0 ]; then
 				msg "alpha patch applied: background only, text stays opaque"
 			else
 				warn "alpha patch did not apply; re-extracting clean source"
-				fetch_suckless st 0.9.3 0.9.2 0.9.1 0.9 || true
+				fetch_suckless st st 0.9.3 0.9.2 0.9.1 0.9 || true
 				ST_DIR="$FETCH_DIR"
 				warn "transparency will come from picom instead (text fades too)"
 			fi
@@ -441,12 +441,13 @@ STEOF
 		sed -i "s|^static char \\*font = .*|static char *font = \"$FONT_FAMILY:size=$FONT_SIZE:antialias=true:autohint=true\";|" \
 			"$ST_DIR/config.h"
 		replace_block "$ST_DIR/config.h" \
-			'^static const char \*colorname\[\] =' "$ST_DIR/colors.block"
+			'static const char *colorname[]' "$ST_DIR/colors.block"
 		# the alpha patch adds this line; a harmless no-op if unpatched
 		sed -i "s|^static const float alpha = .*|static const float alpha = $ST_ALPHA;|" \
 			"$ST_DIR/config.h"
 
-		if ( cd "$ST_DIR" && gmake PREFIX=/usr/local \
+		# suckless config.mk hardcodes CC = c99; OpenBSD only has cc
+		if ( cd "$ST_DIR" && gmake CC=cc PREFIX=/usr/local \
 			X11INC=/usr/X11R6/include X11LIB=/usr/X11R6/lib \
 			clean install ) >"$SRC_ROOT/st-build.log" 2>&1
 		then
@@ -462,7 +463,7 @@ STEOF
 
 	# ---- dmenu ----------------------------------------------------------
 	msg "building dmenu from source"
-	if fetch_suckless dmenu 5.3 5.2 5.1 5.0; then
+	if fetch_suckless dmenu tools 5.3 5.2 5.1 5.0; then
 		DM_DIR="$FETCH_DIR"
 		if fetch_patch "https://tools.suckless.org/dmenu/patches/center/" \
 			"dmenu-center-[0-9]" "$SRC_ROOT/dmenu-center.diff" "$FETCH_VER"
@@ -473,7 +474,7 @@ STEOF
 				msg "center patch applied"
 			else
 				warn "center patch did not apply; re-extracting clean source"
-				fetch_suckless dmenu 5.3 5.2 5.1 5.0 || true
+				fetch_suckless dmenu tools 5.3 5.2 5.1 5.0 || true
 				DM_DIR="$FETCH_DIR"
 				warn "dmenu will be a top bar rather than centered"
 			fi
@@ -496,15 +497,15 @@ static const char *fonts[] = {
 DMFEOF
 		cp "$DM_DIR/config.def.h" "$DM_DIR/config.h"
 		replace_block "$DM_DIR/config.h" \
-			'^static const char \*fonts\[\] =' "$DM_DIR/fonts.block"
+			'static const char *fonts[]' "$DM_DIR/fonts.block"
 		replace_block "$DM_DIR/config.h" \
-			'^static const char \*colors\[SchemeLast\]\[2\] =' "$DM_DIR/colors.block"
+			'static const char *colors[SchemeLast][2]' "$DM_DIR/colors.block"
 		# the center patch adds these; turning it on avoids needing -c
 		sed -i -e "s|^static int centered = .*|static int centered = 1;|" \
 			-e "s|^static int min_width = .*|static int min_width = 720;|" \
 			"$DM_DIR/config.h"
 
-		if ( cd "$DM_DIR" && gmake PREFIX=/usr/local \
+		if ( cd "$DM_DIR" && gmake CC=cc PREFIX=/usr/local \
 			X11INC=/usr/X11R6/include X11LIB=/usr/X11R6/lib \
 			clean install ) >"$SRC_ROOT/dmenu-build.log" 2>&1
 		then
