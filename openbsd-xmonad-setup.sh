@@ -1,6 +1,5 @@
-# I know this is slop
 #!/bin/sh
-#
+# I know it's slop man
 # openbsd-xmonad-setup.sh
 #
 # Turns a stock OpenBSD install into an xmonad desktop with sway-style
@@ -103,13 +102,14 @@ FONT_FAMILY="$FONT_FALLBACK"       # replaced below if Code New Roman lands
 # One size for every font in the desktop, in points.  13pt is about 17px
 # at 96dpi, so the bar and the tab decorations have to grow with it or the
 # text gets clipped -- keep at least 12px of slack in both.
-FONT_SIZE="13"
-BAR_HEIGHT="32"                    # xmobar
-DECO_HEIGHT="30"                   # xmonad tab bars
+FONT_SIZE="16"
+BAR_HEIGHT="38"                    # xmobar
+DECO_HEIGHT="36"                   # xmonad tab bars
 
 # Borders and gaps.  Both border colours are light purple so every window
 # is outlined; the focused one is simply brighter.
-C_BORDER="#8b79c4"                 # unfocused window border
+C_BORDER="#453a62"                 # unfocused: Haskell lambda purple
+C_BORDER_FOCUS="#5e5086"           # focused: Haskell bind purple
 BORDER_WIDTH="3"
 GAP_OUTER="8"                      # between the tiling area and the screen
 GAP_INNER="4"                      # around each window, so 8px between two
@@ -229,23 +229,51 @@ fi
 # ------------------------------------------------------------------- fonts --
 
 FONT_DIR="/usr/local/share/fonts/CodeNewRoman"
-if [ "$SKIP_PKGS" -eq 0 ] && [ ! -d "$FONT_DIR" ]; then
+
+have_cnr() { fc-list : family 2>/dev/null | grep -qi 'code.*new.*roman'; }
+
+# Guard on the font actually being installed, not on the directory being
+# there: a failed unpack leaves an empty directory behind, and testing for
+# the directory then skips the retry forever.
+if [ "$SKIP_PKGS" -eq 0 ] && ! have_cnr; then
 	if ! command -v unzip >/dev/null 2>&1; then
 		warn "unzip is missing, so Code New Roman cannot be unpacked."
-		warn "  pkg_add unzip, then re-run with -n -N to pick it up."
+		warn "  pkg_add unzip, then re-run to pick it up."
 	else
 		msg "fetching Code New Roman (Nerd Fonts build)"
 		mkdir -p "$FONT_DIR"
 		if ftp -o "/tmp/cnr.$STAMP.zip" \
 			"https://github.com/ryanoasis/nerd-fonts/releases/latest/download/CodeNewRoman.zip"
 		then
-			unzip -qo "/tmp/cnr.$STAMP.zip" '*.ttf' -d "$FONT_DIR" || true
+			unzip -qo "/tmp/cnr.$STAMP.zip" '*.ttf' -d "$FONT_DIR" ||
+				warn "unzip failed on the font archive"
 			rm -f "/tmp/cnr.$STAMP.zip"
-			fc-cache -f "$FONT_DIR" >/dev/null 2>&1 ||
-				fc-cache -f >/dev/null 2>&1 || true
+			if ls "$FONT_DIR"/*.ttf >/dev/null 2>&1; then
+				fc-cache -f "$FONT_DIR" >/dev/null 2>&1 ||
+					fc-cache -f >/dev/null 2>&1 || true
+				# fontconfig does not always scan /usr/local/share/fonts
+				if ! have_cnr; then
+					msg "adding $FONT_DIR to the fontconfig search path"
+					mkdir -p /etc/fonts
+					if ! grep -q 'local/share/fonts' /etc/fonts/local.conf 2>/dev/null
+					then
+						cat >>/etc/fonts/local.conf <<'FCEOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>/usr/local/share/fonts</dir>
+</fontconfig>
+FCEOF
+					fi
+					fc-cache -f >/dev/null 2>&1 || true
+				fi
+			else
+				warn "no .ttf files landed in $FONT_DIR"
+				rm -rf "$FONT_DIR"
+			fi
 		else
 			warn "could not download Code New Roman; falling back to $FONT_FALLBACK"
-			rmdir "$FONT_DIR" 2>/dev/null || true
+			rm -rf "$FONT_DIR"
 		fi
 	fi
 fi
@@ -284,6 +312,7 @@ render() {   # render <destination> <mode>;  template on stdin
 		-e "s|@BARH@|$BAR_HEIGHT|g" \
 		-e "s|@DECOH@|$DECO_HEIGHT|g" \
 		-e "s|@BORDER@|$C_BORDER|g" \
+		-e "s|@BORDERF@|$C_BORDER_FOCUS|g" \
 		-e "s|@BORDERW@|$BORDER_WIDTH|g" \
 		-e "s|@GAPOUT@|$GAP_OUTER|g" \
 		-e "s|@GAPIN@|$GAP_INNER|g" \
@@ -489,6 +518,24 @@ STEOF
 			warn "could not fetch the center patch; dmenu will be a top bar"
 		fi
 
+		# A second patch on the same tree, so dry-run first: a half
+		# applied patch would wreck the centering we just did.
+		if fetch_patch "https://tools.suckless.org/dmenu/patches/border/" \
+			"dmenu-border-[0-9]" "$SRC_ROOT/dmenu-border.diff" "$FETCH_VER"
+		then
+			if ( cd "$DM_DIR" && patch -p1 --forward --dry-run --silent \
+				<"$SRC_ROOT/dmenu-border.diff" ) >/dev/null 2>&1
+			then
+				( cd "$DM_DIR" && patch -p1 --forward --silent \
+					<"$SRC_ROOT/dmenu-border.diff" )
+				msg "border patch applied"
+			else
+				warn "border patch does not fit alongside the center patch"
+			fi
+		else
+			warn "could not fetch the border patch; dmenu will have no border"
+		fi
+
 		render "$DM_DIR/colors.block" 644 <<'DMEOF'
 static const char *colors[SchemeLast][2] = {
 	/*                 foreground   background */
@@ -511,9 +558,12 @@ DMFEOF
 			'static const char *fonts[]' "$DM_DIR/fonts.block"
 		replace_block "$DM_DIR/config.h" \
 			'static const char *colors[SchemeLast][2]' "$DM_DIR/colors.block"
-		# the center patch adds these; turning it on avoids needing -c
+		# the center patch adds these; turning it on avoids needing -c.
+		# border_width comes from the border patch and draws in SchemeSel's
+		# background, which is the same light purple as the selection.
 		sed -i -e "s|^static int centered = .*|static int centered = 1;|" \
 			-e "s|^static int min_width = .*|static int min_width = 720;|" \
+			-e "s|^static unsigned int border_width = .*|static unsigned int border_width = 3;|" \
 			"$DM_DIR/config.h"
 
 		if ( cd "$DM_DIR" && gmake CC=cc PREFIX=/usr/local \
@@ -611,6 +661,7 @@ import           System.IO (Handle, hPutStrLn)
 import XMonad
 import XMonad.Actions.Navigation2D
 import XMonad.Actions.Submap (submap)
+import Control.Monad (when)
 import XMonad.Hooks.DynamicLog
 import XMonad.Hooks.EwmhDesktops (ewmh)
 import XMonad.Hooks.ManageDocks (ToggleStruts (..), avoidStruts, docks)
@@ -630,7 +681,8 @@ import qualified XMonad.StackSet as W
 
 -- theme --------------------------------------------------------------------
 
-colBg, colBgAlt, colFg, colDim, colAccent, colUrgent, colMag, colBorder :: String
+colBg, colBgAlt, colFg, colDim, colAccent, colUrgent, colMag :: String
+colBorder, colBorderFocus :: String
 colBg     = "@BG@"
 colBgAlt  = "@BGALT@"
 colFg     = "@FG@"
@@ -639,6 +691,7 @@ colAccent = "@ACCENT@"
 colUrgent = "@URGENT@"
 colMag    = "@HSMAG@"
 colBorder = "@BORDER@"
+colBorderFocus = "@BORDERF@"
 
 myFont :: String
 myFont = "xft:@FONT@:size=@FSIZE@"
@@ -689,7 +742,7 @@ main = do
             , workspaces         = myWorkspaces
             , borderWidth        = @BORDERW@
             , normalBorderColor  = colBorder
-            , focusedBorderColor = colAccent
+            , focusedBorderColor = colBorderFocus
             , focusFollowsMouse  = True
             , clickJustFocuses   = False
             , layoutHook         = myLayout
@@ -777,6 +830,28 @@ ignoring :: IO a -> IO ()
 ignoring a = (a >> return ()) `E.catch` \e ->
     const (return ()) (e :: E.SomeException)
 
+-- sway moves focus to the next output when there is no window that way.
+-- xmonad's windowGo just does nothing, which strands the focus on one
+-- screen -- and then whatever you launch opens on the screen you thought
+-- you had left.  Fall back to moving between screens.
+goDir :: Direction2D -> X ()
+goDir d = do
+    before <- gets windowset
+    windowGo d False
+    after <- gets windowset
+    when (W.peek before == W.peek after
+          && W.screen (W.current before) == W.screen (W.current after))
+        (screenGo d False)
+
+-- Likewise for carrying a window: swap with the neighbour if there is
+-- one, otherwise push it onto the adjacent screen.
+moveDir :: Direction2D -> X ()
+moveDir d = do
+    before <- gets windowset
+    windowSwap d False
+    after <- gets windowset
+    when (W.index before == W.index after) (windowToScreen d False)
+
 firstOf :: [String] -> IO String
 firstOf []       = return "xterm"
 firstOf (c : cs) = do
@@ -804,22 +879,22 @@ myKeys term =
 
       -- focus and movement.  Navigation2D crosses monitors, which is how
       -- windows move between outputs here.
-    , ("M-h",          windowGo L False)
-    , ("M-j",          windowGo D False)
-    , ("M-k",          windowGo U False)
-    , ("M-l",          windowGo R False)
-    , ("M-<Left>",     windowGo L False)
-    , ("M-<Down>",     windowGo D False)
-    , ("M-<Up>",       windowGo U False)
-    , ("M-<Right>",    windowGo R False)
-    , ("M-S-h",        windowSwap L False)
-    , ("M-S-j",        windowSwap D False)
-    , ("M-S-k",        windowSwap U False)
-    , ("M-S-l",        windowSwap R False)
-    , ("M-S-<Left>",   windowSwap L False)
-    , ("M-S-<Down>",   windowSwap D False)
-    , ("M-S-<Up>",     windowSwap U False)
-    , ("M-S-<Right>",  windowSwap R False)
+    , ("M-h",          goDir L)
+    , ("M-j",          goDir D)
+    , ("M-k",          goDir U)
+    , ("M-l",          goDir R)
+    , ("M-<Left>",     goDir L)
+    , ("M-<Down>",     goDir D)
+    , ("M-<Up>",       goDir U)
+    , ("M-<Right>",    goDir R)
+    , ("M-S-h",        moveDir L)
+    , ("M-S-j",        moveDir D)
+    , ("M-S-k",        moveDir U)
+    , ("M-S-l",        moveDir R)
+    , ("M-S-<Left>",   moveDir L)
+    , ("M-S-<Down>",   moveDir D)
+    , ("M-S-<Up>",     moveDir U)
+    , ("M-S-<Right>",  moveDir R)
 
       -- layout
     , ("M-f",          sendMessage (Toggle FULL))
@@ -1175,9 +1250,12 @@ xmonad, sway-style bindings          (mod = Super / Windows key)
   mod-Shift-e          exit -- then press y to confirm
   mod-Shift-c          rebuild xmonad.hs and restart
 
-  mod-h/j/k/l          focus left/down/up/right, across monitors
+  mod-h/j/k/l          focus left/down/up/right.  With no window that
+                       way, focus moves to the next monitor instead, so
+                       what you launch next opens where you are looking.
   mod-arrows           the same
-  mod-Shift-h/j/k/l    move the window in that direction
+  mod-Shift-h/j/k/l    move the window that way; with no neighbour, it
+                       is pushed onto the adjacent monitor
   mod-1 .. mod-9       go to workspace N
   mod-Shift-1 .. 9     move the window to workspace N
 
@@ -1205,7 +1283,8 @@ Where xmonad and sway differ
   an existing split, so mod-b and mod-v both rotate it.
   mod-w tabs the whole workspace rather than one container.
   There are no containers, so mod-a walks the BSP tree instead.
-  Monitors are not bound to keys: mod-h and mod-l cross between them.
+  Monitors are not bound to keys: mod-h and mod-l cross between them,
+  falling through to the next screen when no window lies that way.
 
 Files
   ~/.config/xmonad/xmonad.hs        then mod-Shift-c
