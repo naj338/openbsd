@@ -34,6 +34,7 @@ SKIP_SRC=0
 START_DM=0
 FIX_WX=0
 FONT_SIZE_OPT=""
+CONFIG_MODE=""
 
 msg()  { printf '\033[1;35m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==> warning:\033[0m %s\n' "$*" >&2; }
@@ -41,13 +42,17 @@ die()  { printf '\033[1;31m==> error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat >&2 <<EOF
-usage: $PROG [-u user] [-m "OUT1,OUT2"] [-f size] [-n] [-N] [-s] [-w]
+usage: $PROG [-u user] [-m "OUT1,OUT2"] [-f size] [-c mode]
+             [-n] [-N] [-s] [-w]
 
     -u user  account to configure (default: \$SUDO_USER / \$DOAS_USER)
     -m list  monitor outputs in physical order, left to right, as they
              appear in 'xrandr -q'.  e.g. -m "DP-1,HDMI-1"
     -f size  font size in points, used everywhere.  Without it the
              script asks, defaulting to 16.
+    -c mode  what to do with configuration files already in place:
+             "backup" keeps them as .bak, "delete" removes them.
+             Without it the script asks.
     -n       skip package installation
     -N       skip the st and dmenu source builds
     -s       start xenodm as soon as the script finishes
@@ -57,11 +62,12 @@ EOF
 	exit 1
 }
 
-while getopts u:m:f:nNsw opt; do
+while getopts u:m:f:c:nNsw opt; do
 	case "$opt" in
 	u) TARGET_USER="$OPTARG" ;;
 	m) OUTPUTS="$OPTARG" ;;
 	f) FONT_SIZE_OPT="$OPTARG" ;;
+	c) CONFIG_MODE="$OPTARG" ;;
 	n) SKIP_PKGS=1 ;;
 	N) SKIP_SRC=1 ;;
 	s) START_DM=1 ;;
@@ -147,11 +153,58 @@ TARGET_GROUP="$(id -gn "$TARGET_USER")"
 HOMEDIR="$(awk -F: -v u="$TARGET_USER" '$1 == u { print $9 }' /etc/master.passwd)"
 [ -n "$HOMEDIR" ] && [ -d "$HOMEDIR" ] || die "no home directory for $TARGET_USER"
 
+CFGDIR="$HOMEDIR/.config/xmonad"
 XM_ROOT="/usr/local/xmonad/$TARGET_USER"
 SRC_ROOT="/usr/local/xmonad/src"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
 msg "configuring xmonad for $TARGET_USER ($HOMEDIR) on $ARCH"
+
+# What to do with configuration that is already there.  Ask before
+# touching anything, since a re-run otherwise quietly rewrites files the
+# person may have edited by hand.
+EXISTING=""
+for f in "$HOMEDIR/.xsession" "$HOMEDIR/.Xresources" "$CFGDIR/xmonad.hs" \
+	"$CFGDIR/build" "$CFGDIR/xmonad-config.cabal" \
+	"$HOMEDIR/.config/xmobar/xmobarrc" "$HOMEDIR/.config/picom.conf"; do
+	if [ -e "$f" ]; then
+		EXISTING="$EXISTING $f"
+	fi
+done
+
+if [ -n "$EXISTING" ] && [ -z "$CONFIG_MODE" ]; then
+	echo
+	echo "These configuration files are already in place:"
+	for f in $EXISTING; do
+		echo "    $f"
+	done
+	echo
+	echo "  b  back each one up as <file>.bak, then write the new one"
+	echo "  d  delete them, along with any old .bak files, then write"
+	echo "  q  quit without changing anything"
+	printf 'Choice [b]: '
+	if read -r ans; then
+		case "$ans" in
+		[Dd]*) CONFIG_MODE="delete" ;;
+		[Qq]*) msg "nothing changed"; exit 0 ;;
+		*)     CONFIG_MODE="backup" ;;
+		esac
+	else
+		CONFIG_MODE="backup"
+	fi
+fi
+case "${CONFIG_MODE:-backup}" in
+delete) CONFIG_MODE="delete"; msg "existing configuration will be deleted" ;;
+backup) CONFIG_MODE="backup" ;;
+*)      die "unknown -c mode '$CONFIG_MODE' (use backup or delete)" ;;
+esac
+
+if [ "$CONFIG_MODE" = "delete" ]; then
+	# clear out the timestamped backups earlier versions of this script
+	# scattered around, so they stop accumulating
+	rm -f "$HOMEDIR"/.*.bak.[0-9]* "$CFGDIR"/*.bak.[0-9]* \
+		"$HOMEDIR"/.config/xmobar/*.bak.[0-9]* 2>/dev/null || true
+fi
 
 # Font size: -f wins; otherwise ask, but only when there is a terminal to
 # ask on, so the script stays usable non-interactively.
@@ -407,11 +460,20 @@ render() {   # render <destination> <mode>;  template on stdin
 	chmod "$2" "$1"
 }
 
+# Keep the very first version as .orig and exactly one .bak thereafter.
+# Timestamped backups pile up fast when the script is re-run often.
 backup() {
-	if [ -e "$1" ] || [ -L "$1" ]; then
-		mv "$1" "$1.bak.$STAMP"
-		warn "moved existing $1 aside to $1.bak.$STAMP"
+	[ -e "$1" ] || [ -L "$1" ] || return 0
+	if [ "$CONFIG_MODE" = "delete" ]; then
+		rm -rf "$1"
+		return 0
 	fi
+	# keep the very first version as .orig and exactly one .bak after
+	if [ -f "$1" ] && [ ! -e "$1.orig" ]; then
+		cp -p "$1" "$1.orig"
+	fi
+	rm -rf "$1.bak"
+	mv "$1" "$1.bak"
 }
 
 # =========================================================================
@@ -577,6 +639,25 @@ STEOF
 			"$ST_DIR/config.h"
 		replace_block "$ST_DIR/config.h" \
 			'static const char *colorname[]' "$ST_DIR/colors.block"
+		# The base scrollback patch gives us kscrollup/kscrolldown but
+		# leaves the wheel bound to ttysend "\031", which is ^Y -- ksh
+		# reads that as yank and answers "nothing to yank".  Rebind it
+		# directly; the scrollback-mouse patch does exactly this and
+		# often will not apply on top of alpha.
+		if grep -q 'kscrollup' "$ST_DIR/config.h"; then
+			sed -i \
+				-e 's|ttysend,\( *\){.s = "\\031"}|kscrollup,\1{.i = 3}|' \
+				-e 's|ttysend,\( *\){.s = "\\005"}|kscrolldown,\1{.i = 3}|' \
+				"$ST_DIR/config.h"
+			if grep -q 'Button4, *kscrollup' "$ST_DIR/config.h"; then
+				msg "mouse wheel bound to the scrollback buffer"
+				ST_SCROLL=1
+			else
+				warn "could not rebind the wheel; it will still send ^Y"
+				ST_SCROLL=2
+			fi
+		fi
+
 		# both are added by patches; each sed is a no-op if absent
 		sed -i "s|^static const float alpha = .*|static const float alpha = $ST_ALPHA;|" \
 			"$ST_DIR/config.h"
@@ -731,7 +812,6 @@ fi
 msg "creating the build area in $XM_ROOT"
 mkdir -p "$XM_ROOT/cabal" "$XM_ROOT/tmp" "$XM_ROOT/dist" "$XM_ROOT/cache"
 
-CFGDIR="$HOMEDIR/.config/xmonad"
 mkdir -p "$CFGDIR" "$HOMEDIR/.config/xmobar" "$HOMEDIR/.local/bin" \
 	"$HOMEDIR/.local/share/xmonad" "$HOMEDIR/.cache"
 
@@ -933,7 +1013,10 @@ myPP hs = xmobarPP
       -- the Spacing modifier prepends its name to the description
     , ppLayout          = xmobarColor colMag ""
                             . unwords . filter (/= "Spacing") . words
+      -- a window title containing < or > is parsed as markup and makes
+      -- xmobar reject the whole line ("Could not parse string")
     , ppTitle           = xmobarColor colFg "" . shorten 80
+                            . filter (`notElem` "<>")
       -- keep the scratchpad's hidden workspace out of the bar
     , ppSort            = fmap (. filter ((/= "NSP") . W.tag)) (ppSort xmobarPP)
     }
