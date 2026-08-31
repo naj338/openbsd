@@ -1,5 +1,5 @@
 #!/bin/sh
-# I know it's slop man
+#
 # openbsd-xmonad-setup.sh
 #
 # Turns a stock OpenBSD install into an xmonad desktop with sway-style
