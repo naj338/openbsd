@@ -1,8 +1,20 @@
-* Description
+* OpenBSD Tools
+
+* openbsd-torify
+** Description
+- Routes all traffic on an openbsd machine through tor
+
+** How to
+1. Download the file using git or wget/curl
+2. Run:
+=doas sh openbsd-torify.sh=
+
+* openbsd-xmonad-setup
+** Description
 - Uses st, dmenu, xmobar, xmonad, and xenodm
 - All apps themed with haskell colors & custom font
 
-* How to
-1. Download the file using git or wget
+** How to
+1. Download the file using git or wget/curl
 2. Run:
 =doas sh openbsd-xmonad-setup.sh -u YOURUSERNAME -m [DISPLAY CONFIGURATION (OPTIONAL)]= 
