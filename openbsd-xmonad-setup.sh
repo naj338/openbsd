@@ -33,6 +33,7 @@ SKIP_PKGS=0
 SKIP_SRC=0
 START_DM=0
 FIX_WX=0
+FONT_SIZE_OPT=""
 
 msg()  { printf '\033[1;35m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==> warning:\033[0m %s\n' "$*" >&2; }
@@ -40,11 +41,13 @@ die()  { printf '\033[1;31m==> error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat >&2 <<EOF
-usage: $PROG [-u user] [-m "OUT1,OUT2"] [-n] [-N] [-s] [-w]
+usage: $PROG [-u user] [-m "OUT1,OUT2"] [-f size] [-n] [-N] [-s] [-w]
 
     -u user  account to configure (default: \$SUDO_USER / \$DOAS_USER)
     -m list  monitor outputs in physical order, left to right, as they
              appear in 'xrandr -q'.  e.g. -m "DP-1,HDMI-1"
+    -f size  font size in points, used everywhere.  Without it the
+             script asks, defaulting to 16.
     -n       skip package installation
     -N       skip the st and dmenu source builds
     -s       start xenodm as soon as the script finishes
@@ -54,10 +57,11 @@ EOF
 	exit 1
 }
 
-while getopts u:m:nNsw opt; do
+while getopts u:m:f:nNsw opt; do
 	case "$opt" in
 	u) TARGET_USER="$OPTARG" ;;
 	m) OUTPUTS="$OPTARG" ;;
+	f) FONT_SIZE_OPT="$OPTARG" ;;
 	n) SKIP_PKGS=1 ;;
 	N) SKIP_SRC=1 ;;
 	s) START_DM=1 ;;
@@ -102,9 +106,9 @@ FONT_FAMILY="$FONT_FALLBACK"       # replaced below if Code New Roman lands
 # One size for every font in the desktop, in points.  13pt is about 17px
 # at 96dpi, so the bar and the tab decorations have to grow with it or the
 # text gets clipped -- keep at least 12px of slack in both.
-FONT_SIZE="16"
-BAR_HEIGHT="38"                    # xmobar
-DECO_HEIGHT="36"                   # xmonad tab bars
+FONT_SIZE="16"                     # points; -f or the prompt overrides
+BAR_HEIGHT=""                      # xmobar, derived from FONT_SIZE below
+DECO_HEIGHT=""                     # xmonad tab bars, likewise
 
 # Borders and gaps.  Both border colours are light purple so every window
 # is outlined; the focused one is simply brighter.
@@ -148,6 +152,25 @@ SRC_ROOT="/usr/local/xmonad/src"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
 msg "configuring xmonad for $TARGET_USER ($HOMEDIR) on $ARCH"
+
+# Font size: -f wins; otherwise ask, but only when there is a terminal to
+# ask on, so the script stays usable non-interactively.
+if [ -n "$FONT_SIZE_OPT" ]; then
+	FONT_SIZE="$FONT_SIZE_OPT"
+elif [ -t 0 ]; then
+	printf 'Font size in points [%s]: ' "$FONT_SIZE"
+	if read -r ans && [ -n "$ans" ]; then
+		case "$ans" in
+		*[!0-9]*) warn "'$ans' is not a number; keeping ${FONT_SIZE}pt" ;;
+		*)        FONT_SIZE="$ans" ;;
+		esac
+	fi
+fi
+# 1pt is 4/3 px at 96dpi; the constants are the padding that keeps text
+# off the edges of the bar and the tab decorations.
+BAR_HEIGHT=$(( FONT_SIZE * 4 / 3 + 17 ))
+DECO_HEIGHT=$(( FONT_SIZE * 4 / 3 + 15 ))
+msg "font ${FONT_SIZE}pt, bar ${BAR_HEIGHT}px, tabs ${DECO_HEIGHT}px"
 
 WX_MNT="$(df -k /usr/local | awk 'NR == 2 { print $NF }')"
 if mount | grep -q "on $WX_MNT type .*wxallowed"; then
@@ -309,6 +332,25 @@ if [ "$FONT_FAMILY" = "$FONT_FALLBACK" ]; then
 fi
 msg "using font: $FONT_FAMILY"
 
+# xmobar changed how fonts are named.  Up to 0.46 the string had to
+# carry an "xft:" prefix; from 0.47 it is a plain fontconfig name and an
+# "xft:" string is taken for a core X font, quietly fails to load, and
+# falls back to a default -- which looks exactly like the setting being
+# ignored.  Pick by version rather than guessing.
+XMOBAR_VER="$(xmobar --version 2>/dev/null | head -n 1 |
+	sed -n 's/.*[Xx]mobar[ v]*\([0-9][0-9.]*\).*/\1/p')"
+XMOBAR_MAJ="${XMOBAR_VER%%.*}"
+XMOBAR_MIN="$(echo "$XMOBAR_VER" | cut -d. -f2)"
+case "$XMOBAR_MAJ" in ''|*[!0-9]*) XMOBAR_MAJ=0 ;; esac
+case "$XMOBAR_MIN" in ''|*[!0-9]*) XMOBAR_MIN=0 ;; esac
+
+if [ "$XMOBAR_MAJ" -gt 0 ] || [ "$XMOBAR_MIN" -ge 47 ]; then
+	XMOBAR_FONT="$FONT_FAMILY $FONT_SIZE"
+	msg "xmobar ${XMOBAR_VER:-unknown}: using the plain font name"
+else
+	XMOBAR_FONT="xft:$FONT_FAMILY:size=$FONT_SIZE"
+	msg "xmobar ${XMOBAR_VER:-unknown}: using the xft: font name"
+fi
 # xenodm only understands Xft patterns if it was linked against libXft;
 # otherwise it needs a core XLFD name.  Guessing wrong here means a login
 # screen that cannot draw, so ask the binary rather than assume.
@@ -331,6 +373,7 @@ fi
 render() {   # render <destination> <mode>;  template on stdin
 	sed \
 		-e "s|@FONT@|$FONT_FAMILY|g" \
+		-e "s|@XMOFONT@|$XMOBAR_FONT|g" \
 		-e "s|@FSIZE@|$FONT_SIZE|g" \
 		-e "s|@BARH@|$BAR_HEIGHT|g" \
 		-e "s|@DECOH@|$DECO_HEIGHT|g" \
@@ -381,6 +424,9 @@ backup() {
 # =========================================================================
 
 ST_PATCHED=0
+ST_SCROLL=0
+DM_CENTER=0
+DM_BORDER=0
 
 # OpenBSD's ftp(1) prints "Trying .../Requesting ..." on stdout, so a
 # function whose output is captured must keep it quiet (-V) and return its
@@ -492,11 +538,14 @@ if [ "$SKIP_SRC" -eq 0 ]; then
 
 		# st ships with no scrollback at all, which is why the mouse
 		# wheel just sends ^Y and ^E to the shell.
-		try_patch "https://st.suckless.org/patches/scrollback/" \
-			"st-scrollback-[0-9]" "st-scrollback" "$ST_DIR" "$FETCH_VER" &&
+		if try_patch "https://st.suckless.org/patches/scrollback/" \
+			"st-scrollback-[0-9]" "st-scrollback" "$ST_DIR" "$FETCH_VER"
+		then
+			ST_SCROLL=1
 			try_patch "https://st.suckless.org/patches/scrollback/" \
 				"st-scrollback-mouse-[0-9]" "st-scrollback-mouse" \
-				"$ST_DIR" "$FETCH_VER" || true
+				"$ST_DIR" "$FETCH_VER" || ST_SCROLL=2
+		fi
 
 		render "$ST_DIR/colors.block" 644 <<'STEOF'
 static const char *colorname[] = {
@@ -544,6 +593,7 @@ STEOF
 			warn "st failed to build. Last lines of $SRC_ROOT/st-build.log:"
 			tail -n 15 "$SRC_ROOT/st-build.log" >&2
 			ST_PATCHED=0
+			ST_SCROLL=0
 		fi
 	else
 		warn "could not download st; the terminal will fall back to xterm"
@@ -559,6 +609,7 @@ STEOF
 			if ( cd "$DM_DIR" && patch -p1 --forward --silent \
 				<"$SRC_ROOT/dmenu-center.diff" )
 			then
+				DM_CENTER=1
 				msg "center patch applied"
 			else
 				warn "center patch did not apply; re-extracting clean source"
@@ -571,8 +622,6 @@ STEOF
 		fi
 
 		# second patch on the same tree, so it gets dry-run first
-		try_patch "https://tools.suckless.org/dmenu/patches/border/" \
-			"dmenu-border-[0-9]" "dmenu-border" "$DM_DIR" "$FETCH_VER" || true
 
 		render "$DM_DIR/colors.block" 644 <<'DMEOF'
 static const char *colors[SchemeLast][2] = {
@@ -590,6 +639,31 @@ DMFEOF
 		# freetype lives under /usr/X11R6 here, not /usr/include
 		sed -i 's|^FREETYPEINC *=.*|FREETYPEINC = /usr/X11R6/include/freetype2|' \
 			"$DM_DIR/config.mk"
+
+		# dmenu draws no border of its own.  The border patch does not sit
+		# well next to the center patch -- both rewrite the same part of
+		# setup() -- so make the three edits directly and check each one
+		# took, which is more predictable than hoping a patch applies.
+		if grep -q 'border_width' "$DM_DIR/config.def.h"; then
+			DM_BORDER=1
+		else
+			printf '\nstatic unsigned int border_width = %s;\n' \
+				"$BORDER_WIDTH" >>"$DM_DIR/config.def.h"
+			sed -i \
+				-e 's@swa.background_pixel = scheme\[SchemeNorm\]\[ColBg\]->pixel;@& swa.border_pixel = scheme[SchemeSel][ColBg]->pixel;@' \
+				-e 's@CWOverrideRedirect | CWBackPixel | CWEventMask@CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask@' \
+				-e 's@mw, mh, 0,@mw, mh, border_width,@' \
+				"$DM_DIR/dmenu.c"
+			if grep -q 'border_pixel' "$DM_DIR/dmenu.c" &&
+				grep -q 'CWBorderPixel' "$DM_DIR/dmenu.c" &&
+				grep -q 'mh, border_width' "$DM_DIR/dmenu.c"
+			then
+				DM_BORDER=1
+				msg "dmenu border added (${BORDER_WIDTH}px, selection colour)"
+			else
+				warn "could not add a border to dmenu.c; it will be borderless"
+			fi
+		fi
 
 		cp "$DM_DIR/config.def.h" "$DM_DIR/config.h"
 		replace_block "$DM_DIR/config.h" \
@@ -854,7 +928,9 @@ myPP hs = xmobarPP
     , ppUrgent          = xmobarColor colUrgent "" . pad
     , ppSep             = xmobarColor colDim "" "   "
     , ppWsSep           = ""
+      -- the Spacing modifier prepends its name to the description
     , ppLayout          = xmobarColor colMag ""
+                            . unwords . filter (/= "Spacing") . words
     , ppTitle           = xmobarColor colFg "" . shorten 80
       -- keep the scratchpad's hidden workspace out of the bar
     , ppSort            = fmap (. filter ((/= "NSP") . W.tag)) (ppSort xmobarPP)
@@ -1066,7 +1142,7 @@ backup "$HOMEDIR/.config/xmobar/xmobarrc"
 render "$HOMEDIR/.config/xmobar/xmobarrc" 644 <<'EOF'
 -- One instance per screen, started by xmonad with -x N.
 -- StdinReader is fed by the logHook: workspaces, layout, window title.
-Config { font         = "xft:@FONT@:size=@FSIZE@"
+Config { font         = "@XMOFONT@"
        , bgColor      = "@BG@"
        , fgColor      = "@FG@"
        , position     = TopSize L 100 @BARH@
@@ -1166,8 +1242,10 @@ exec xsetroot -solid "$BACKGROUND_COLOR"
 EOF
 chmod 755 "$HOMEDIR/.local/bin/xmonad-background"
 
-msg "writing $CFGDIR/displays.conf"
-if [ ! -f "$CFGDIR/displays.conf" ]; then
+# An explicit -m must win over an existing file, otherwise re-running with
+# a corrected monitor order silently does nothing.
+if [ -n "$OUTPUTS" ] || [ ! -f "$CFGDIR/displays.conf" ]; then
+	msg "writing $CFGDIR/displays.conf"
 	{
 		echo "# Outputs in physical order, left to right, as named by 'xrandr -q'."
 		echo "# Applied at session start by ~/.local/bin/xmonad-displays."
@@ -1550,6 +1628,15 @@ Done.
   mod-Shift-/ lists every binding.  mod-Shift-q closes a window;
   leaving the session is mod-Shift-e followed by y.
 
+  To set a wallpaper, put the image path in background.conf and press
+  mod-Shift-w:
+
+      BACKGROUND_IMAGE="\$HOME/pictures/wall.png"
+      BACKGROUND_MODE="zoom"        # or stretch, center, tile, maximize
+
+  Leave BACKGROUND_IMAGE empty for the solid BACKGROUND_COLOR instead.
+  Use a full path; ~ is not expanded there.
+
   Config      ~/.config/xmonad/xmonad.hs      (mod-Shift-c to rebuild)
   Bars        ~/.config/xmobar/xmobarrc       (one per screen)
   Background  ~/.config/xmonad/background.conf
@@ -1575,6 +1662,25 @@ if [ "$FONT_FAMILY" = "$FONT_FALLBACK" ]; then
 else
 	printf '    ok      %-10s %s\n' "font" "$FONT_FAMILY"
 fi
+echo
+echo "  Patches (each one is optional; the build works without them):"
+case "$ST_PATCHED" in
+1) printf '    ok      %-10s %s\n' "st alpha" "background transparency" ;;
+*) printf '    no      %-10s %s\n' "st alpha" "picom fades the text too" ;;
+esac
+case "$ST_SCROLL" in
+1) printf '    ok      %-10s %s\n' "st scroll" "Shift-PageUp and the mouse wheel" ;;
+2) printf '    part    %-10s %s\n' "st scroll" "Shift-PageUp works, wheel still sends ^Y" ;;
+*) printf '    no      %-10s %s\n' "st scroll" "no scrollback; wheel sends ^Y to the shell" ;;
+esac
+case "$DM_CENTER" in
+1) printf '    ok      %-10s %s\n' "dmenu mid" "centered" ;;
+*) printf '    no      %-10s %s\n' "dmenu mid" "top bar" ;;
+esac
+case "$DM_BORDER" in
+1) printf '    ok      %-10s %s\n' "dmenu edge" "border" ;;
+*) printf '    no      %-10s %s\n' "dmenu edge" "no border" ;;
+esac
 echo
 
 if [ -z "$OUTPUTS" ]; then
