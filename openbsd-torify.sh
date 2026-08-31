@@ -201,9 +201,15 @@ VirtualAddrNetworkIPv4 $VIRT_ADDR
 EOF
 chmod 644 "$TORRC"
 
-# Binding port 53 needs root at start-up; tor drops to _tor afterwards.
+# rcctl will not set variables on a service that is not enabled yet, so
+# enable first.  Binding port 53 needs root at start-up; the User line in
+# torrc drops tor to _tor immediately afterwards.
+msg "enabling tor"
+rcctl enable tor
 msg "setting tor to start as root so it can bind port $DNS_PORT"
-rcctl set tor user root
+if ! rcctl set tor user root; then
+	warn "could not set tor to start as root; DNS will fall back to 9053"
+fi
 
 # ---------------------------------------------------------------------- pf ----
 
@@ -279,7 +285,6 @@ fi
 # ------------------------------------------------------------------- apply ----
 
 msg "starting tor"
-rcctl enable tor
 if ! rcctl restart tor; then
 	warn "tor would not start. Falling back to an unprivileged DNS port."
 	sed -i "s|^DNSPort .*|DNSPort 127.0.0.1:9053|" "$TORRC"
