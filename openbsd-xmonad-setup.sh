@@ -230,7 +230,12 @@ fi
 
 FONT_DIR="/usr/local/share/fonts/CodeNewRoman"
 
-have_cnr() { fc-list : family 2>/dev/null | grep -qi 'code.*new.*roman'; }
+# Every family fontconfig can see, one per line, aliases split out.
+font_families() {
+	fc-list : family 2>/dev/null | tr ',' '\n' |
+		sed -e 's/^[ 	]*//' -e 's/[ 	]*$//' | sort -u
+}
+have_cnr() { font_families | grep -qi 'code.*new.*roman'; }
 
 # Guard on the font actually being installed, not on the directory being
 # there: a failed unpack leaves an empty directory behind, and testing for
@@ -245,30 +250,34 @@ if [ "$SKIP_PKGS" -eq 0 ] && ! have_cnr; then
 		if ftp -o "/tmp/cnr.$STAMP.zip" \
 			"https://github.com/ryanoasis/nerd-fonts/releases/latest/download/CodeNewRoman.zip"
 		then
-			unzip -qo "/tmp/cnr.$STAMP.zip" '*.ttf' -d "$FONT_DIR" ||
+			# Extract the lot rather than filtering: the archives have
+			# carried .ttf, .otf and subdirectories at different times,
+			# and a pattern that matches nothing makes unzip fail.
+			unzip -qo "/tmp/cnr.$STAMP.zip" -d "$FONT_DIR" ||
 				warn "unzip failed on the font archive"
 			rm -f "/tmp/cnr.$STAMP.zip"
-			if ls "$FONT_DIR"/*.ttf >/dev/null 2>&1; then
+			n=$(find "$FONT_DIR" -type f \( -iname '*.ttf' -o -iname '*.otf' \) \
+				2>/dev/null | wc -l | tr -d ' ')
+			if [ "${n:-0}" -gt 0 ]; then
+				msg "unpacked $n font files into $FONT_DIR"
 				fc-cache -f "$FONT_DIR" >/dev/null 2>&1 ||
 					fc-cache -f >/dev/null 2>&1 || true
-				# fontconfig does not always scan /usr/local/share/fonts
-				if ! have_cnr; then
+				# fontconfig should scan /usr/local/share/fonts, since that
+				# is where ports put fonts; add it explicitly if it did not
+				if ! have_cnr && [ ! -f /etc/fonts/local.conf ]; then
 					msg "adding $FONT_DIR to the fontconfig search path"
 					mkdir -p /etc/fonts
-					if ! grep -q 'local/share/fonts' /etc/fonts/local.conf 2>/dev/null
-					then
-						cat >>/etc/fonts/local.conf <<'FCEOF'
+					cat >/etc/fonts/local.conf <<'FCEOF'
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
   <dir>/usr/local/share/fonts</dir>
 </fontconfig>
 FCEOF
-					fi
 					fc-cache -f >/dev/null 2>&1 || true
 				fi
 			else
-				warn "no .ttf files landed in $FONT_DIR"
+				warn "no .ttf or .otf files anywhere in the archive"
 				rm -rf "$FONT_DIR"
 			fi
 		else
@@ -278,11 +287,25 @@ FCEOF
 	fi
 fi
 
-# Whatever actually landed decides the font name every config file uses.
-if fc-list : family 2>/dev/null | grep -qi 'CodeNewRoman Nerd Font Mono'; then
-	FONT_FAMILY="CodeNewRoman Nerd Font Mono"
-elif fc-list : family 2>/dev/null | grep -qi 'Code New Roman'; then
-	FONT_FAMILY="Code New Roman"
+# Nerd Fonts registers several family names and the exact spelling varies
+# by release, so try the known ones in order of preference before falling
+# back to whatever matches loosely.
+for want in "CodeNewRoman Nerd Font Mono" "CodeNewRoman Nerd Font" \
+	"CodeNewRoman NFM" "Code New Roman"; do
+	if font_families | grep -qxi "$want"; then
+		FONT_FAMILY="$want"
+		break
+	fi
+done
+if [ "$FONT_FAMILY" = "$FONT_FALLBACK" ]; then
+	cand="$(font_families | grep -i 'code.*new.*roman' | head -n 1)"
+	if [ -n "$cand" ]; then
+		FONT_FAMILY="$cand"
+	else
+		warn "fontconfig cannot see Code New Roman, so $FONT_FALLBACK is in use."
+		warn "  Check:  ls $FONT_DIR"
+		warn "          fc-list | grep -i codenewroman"
+	fi
 fi
 msg "using font: $FONT_FAMILY"
 
@@ -421,6 +444,25 @@ replace_block() {   # <file> <literal declaration prefix> <block-file>
 		warn "could not rewrite $1 (looked for: $2)"
 }
 
+# Fetch a patch and apply it only if it applies cleanly.  Dry-running
+# first matters once a tree already carries one patch: a half-applied
+# second patch leaves .rej files and a broken source.
+try_patch() {   # <url-dir> <name-regex> <label> <srcdir> <version>
+	if ! fetch_patch "$1" "$2" "$SRC_ROOT/$3.diff" "$5"; then
+		warn "could not fetch the $3 patch"
+		return 1
+	fi
+	if ( cd "$4" && patch -p1 --forward --dry-run --silent \
+		<"$SRC_ROOT/$3.diff" ) >/dev/null 2>&1
+	then
+		( cd "$4" && patch -p1 --forward --silent <"$SRC_ROOT/$3.diff" )
+		msg "$3 patch applied"
+		return 0
+	fi
+	warn "the $3 patch does not fit this source tree; skipping it"
+	return 1
+}
+
 if [ "$SKIP_SRC" -eq 0 ]; then
 	mkdir -p "$SRC_ROOT"
 	PKG_CONFIG_PATH="/usr/X11R6/lib/pkgconfig:/usr/local/lib/pkgconfig"
@@ -447,6 +489,14 @@ if [ "$SKIP_SRC" -eq 0 ]; then
 		else
 			warn "could not fetch the alpha patch; using picom's opacity-rule"
 		fi
+
+		# st ships with no scrollback at all, which is why the mouse
+		# wheel just sends ^Y and ^E to the shell.
+		try_patch "https://st.suckless.org/patches/scrollback/" \
+			"st-scrollback-[0-9]" "st-scrollback" "$ST_DIR" "$FETCH_VER" &&
+			try_patch "https://st.suckless.org/patches/scrollback/" \
+				"st-scrollback-mouse-[0-9]" "st-scrollback-mouse" \
+				"$ST_DIR" "$FETCH_VER" || true
 
 		render "$ST_DIR/colors.block" 644 <<'STEOF'
 static const char *colorname[] = {
@@ -478,8 +528,10 @@ STEOF
 			"$ST_DIR/config.h"
 		replace_block "$ST_DIR/config.h" \
 			'static const char *colorname[]' "$ST_DIR/colors.block"
-		# the alpha patch adds this line; a harmless no-op if unpatched
+		# both are added by patches; each sed is a no-op if absent
 		sed -i "s|^static const float alpha = .*|static const float alpha = $ST_ALPHA;|" \
+			"$ST_DIR/config.h"
+		sed -i "s|^static int histsize = .*|static int histsize = 20000;|" \
 			"$ST_DIR/config.h"
 
 		# suckless config.mk hardcodes CC = c99; OpenBSD only has cc
@@ -518,23 +570,9 @@ STEOF
 			warn "could not fetch the center patch; dmenu will be a top bar"
 		fi
 
-		# A second patch on the same tree, so dry-run first: a half
-		# applied patch would wreck the centering we just did.
-		if fetch_patch "https://tools.suckless.org/dmenu/patches/border/" \
-			"dmenu-border-[0-9]" "$SRC_ROOT/dmenu-border.diff" "$FETCH_VER"
-		then
-			if ( cd "$DM_DIR" && patch -p1 --forward --dry-run --silent \
-				<"$SRC_ROOT/dmenu-border.diff" ) >/dev/null 2>&1
-			then
-				( cd "$DM_DIR" && patch -p1 --forward --silent \
-					<"$SRC_ROOT/dmenu-border.diff" )
-				msg "border patch applied"
-			else
-				warn "border patch does not fit alongside the center patch"
-			fi
-		else
-			warn "could not fetch the border patch; dmenu will have no border"
-		fi
+		# second patch on the same tree, so it gets dry-run first
+		try_patch "https://tools.suckless.org/dmenu/patches/border/" \
+			"dmenu-border-[0-9]" "dmenu-border" "$DM_DIR" "$FETCH_VER" || true
 
 		render "$DM_DIR/colors.block" 644 <<'DMEOF'
 static const char *colors[SchemeLast][2] = {
@@ -1272,6 +1310,9 @@ xmonad, sway-style bindings          (mod = Super / Windows key)
 
   mod--                scratchpad terminal
   mod-Shift--          send the focused window to the scratchpad
+
+  Shift-PageUp/Down    scroll the terminal back and forward
+  mouse wheel          the same, once st has the scrollback patch
 
   mod-Shift-b          hide / show the bars
   mod-Shift-w          re-apply the background
