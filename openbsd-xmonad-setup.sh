@@ -709,7 +709,7 @@ static const char *colors[SchemeLast][2] = {
 	/*                 foreground   background */
 	[SchemeNorm] = { "@FG@",     "@BG@"     },
 	[SchemeSel]  = { "@BG@",     "@ACCENT@" },
-	[SchemeOut]  = { "@FG@",     "@BORDERF@" },
+	[SchemeOut]  = { "@FG@",     "@BORDER@"  },
 };
 DMEOF
 		render "$DM_DIR/fonts.block" 644 <<'DMFEOF'
@@ -721,7 +721,9 @@ DMFEOF
 		sed -i 's|^FREETYPEINC *=.*|FREETYPEINC = /usr/X11R6/include/freetype2|' \
 			"$DM_DIR/config.mk"
 
-		# dmenu draws no border of its own.  The border patch does not sit
+		# dmenu draws no border of its own.  SchemeOut is unused by
+		# dmenu itself, so it carries the border colour: the same
+		# C_BORDER every window is outlined with.  The border patch does not sit
 		# well next to the center patch -- both rewrite the same part of
 		# setup() -- so make the three edits directly and check each one
 		# took, which is more predictable than hoping a patch applies.
@@ -730,19 +732,25 @@ DMFEOF
 		else
 			printf '\nstatic unsigned int border_width = %s;\n' \
 				"$BORDER_WIDTH" >>"$DM_DIR/config.def.h"
+			# Patterns are kept loose on whitespace: the exact spacing
+			# of these lines varies between releases and with the
+			# center patch applied.
 			sed -i \
-				-e 's@swa.background_pixel = scheme\[SchemeNorm\]\[ColBg\]->pixel;@& swa.border_pixel = scheme[SchemeOut][ColBg]->pixel;@' \
-				-e 's@CWOverrideRedirect | CWBackPixel | CWEventMask@CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask@' \
-				-e 's@mw, mh, 0,@mw, mh, border_width,@' \
+				-e 's@\(swa\.background_pixel *= *[^;]*;\)@\1 swa.border_pixel = scheme[SchemeOut][ColBg]->pixel;@' \
+				-e 's@CWBackPixel@CWBackPixel | CWBorderPixel@' \
+				-e 's@mh, *0,@mh, border_width,@' \
 				"$DM_DIR/dmenu.c"
-			if grep -q 'border_pixel' "$DM_DIR/dmenu.c" &&
+			if grep -q 'swa.border_pixel' "$DM_DIR/dmenu.c" &&
 				grep -q 'CWBorderPixel' "$DM_DIR/dmenu.c" &&
 				grep -q 'mh, border_width' "$DM_DIR/dmenu.c"
 			then
 				DM_BORDER=1
-				msg "dmenu border added (${BORDER_WIDTH}px, focused-window colour)"
+				msg "dmenu border added (${BORDER_WIDTH}px, window border colour)"
 			else
-				warn "could not add a border to dmenu.c; it will be borderless"
+				# A width with no colour gives a black border, which is
+				# worse than none, so put the width back if any edit missed.
+				sed -i 's@mh, border_width,@mh, 0,@' "$DM_DIR/dmenu.c"
+				warn "could not colour the dmenu border; leaving it borderless"
 			fi
 		fi
 
