@@ -628,7 +628,7 @@ static const char *colors[SchemeLast][2] = {
 	/*                 foreground   background */
 	[SchemeNorm] = { "@FG@",     "@BG@"     },
 	[SchemeSel]  = { "@BG@",     "@ACCENT@" },
-	[SchemeOut]  = { "@BG@",     "@HSMAG@"  },
+	[SchemeOut]  = { "@FG@",     "@BORDERF@" },
 };
 DMEOF
 		render "$DM_DIR/fonts.block" 644 <<'DMFEOF'
@@ -650,7 +650,7 @@ DMFEOF
 			printf '\nstatic unsigned int border_width = %s;\n' \
 				"$BORDER_WIDTH" >>"$DM_DIR/config.def.h"
 			sed -i \
-				-e 's@swa.background_pixel = scheme\[SchemeNorm\]\[ColBg\]->pixel;@& swa.border_pixel = scheme[SchemeSel][ColBg]->pixel;@' \
+				-e 's@swa.background_pixel = scheme\[SchemeNorm\]\[ColBg\]->pixel;@& swa.border_pixel = scheme[SchemeOut][ColBg]->pixel;@' \
 				-e 's@CWOverrideRedirect | CWBackPixel | CWEventMask@CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask@' \
 				-e 's@mw, mh, 0,@mw, mh, border_width,@' \
 				"$DM_DIR/dmenu.c"
@@ -659,7 +659,7 @@ DMFEOF
 				grep -q 'mh, border_width' "$DM_DIR/dmenu.c"
 			then
 				DM_BORDER=1
-				msg "dmenu border added (${BORDER_WIDTH}px, selection colour)"
+				msg "dmenu border added (${BORDER_WIDTH}px, focused-window colour)"
 			else
 				warn "could not add a border to dmenu.c; it will be borderless"
 			fi
@@ -921,13 +921,15 @@ startBar rc n = do
 myPP :: [Handle] -> PP
 myPP hs = xmobarPP
     { ppOutput          = \s -> mapM_ (\h -> safePut h s) hs
+      -- only the current workspace is padded, so its highlight block has
+      -- room to breathe; the rest sit a single space apart
     , ppCurrent         = xmobarColor colBg colAccent . pad
-    , ppVisible         = xmobarColor colAccent "" . pad
-    , ppHidden          = xmobarColor colFg "" . pad
-    , ppHiddenNoWindows = xmobarColor colDim "" . pad
-    , ppUrgent          = xmobarColor colUrgent "" . pad
+    , ppVisible         = xmobarColor colAccent ""
+    , ppHidden          = xmobarColor colFg ""
+    , ppHiddenNoWindows = xmobarColor colDim ""
+    , ppUrgent          = xmobarColor colUrgent ""
     , ppSep             = xmobarColor colDim "" "   "
-    , ppWsSep           = ""
+    , ppWsSep           = " "
       -- the Spacing modifier prepends its name to the description
     , ppLayout          = xmobarColor colMag ""
                             . unwords . filter (/= "Spacing") . words
