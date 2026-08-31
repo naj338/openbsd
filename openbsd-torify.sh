@@ -38,6 +38,7 @@ PROG="${0##*/}"
 LAN_OPT=""
 ASSUME_YES=0
 REVERT=0
+KEEP_ON_FAIL=0
 
 TORRC="/etc/tor/torrc"
 PFCONF="/etc/pf.conf"
@@ -55,21 +56,24 @@ die()  { printf '\033[1;31m==> error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat >&2 <<EOF
-usage: $PROG [-l LAN] [-y] [-r]
+usage: $PROG [-l LAN] [-y] [-r] [-K]
 
     -l LAN   local network that should stay local, e.g. 192.168.0.0/24.
              Detected from the default route if not given.
     -y       do not ask for confirmation
     -r       revert everything and stop Tor
+    -K       keep the changes even if the check at the end fails,
+             for debugging.  Without it a failed check reverts.
 EOF
 	exit 1
 }
 
-while getopts l:yr opt; do
+while getopts l:yrK opt; do
 	case "$opt" in
 	l) LAN_OPT="$OPTARG" ;;
 	y) ASSUME_YES=1 ;;
 	r) REVERT=1 ;;
+	K) KEEP_ON_FAIL=1 ;;
 	*) usage ;;
 	esac
 done
@@ -79,14 +83,12 @@ done
 
 # ------------------------------------------------------------------ revert --
 
-if [ "$REVERT" -eq 1 ]; then
+do_revert() {
 	msg "reverting"
 	for f in "$PFCONF" "$RESOLV" "$TORRC" "$PROFILE"; do
 		if [ -f "$f.pretor" ]; then
 			cp -p "$f.pretor" "$f"
 			msg "restored $f"
-		else
-			warn "no saved copy of $f"
 		fi
 	done
 	rcctl stop tor 2>/dev/null || true
@@ -96,14 +98,32 @@ if [ "$REVERT" -eq 1 ]; then
 	rcctl start resolvd 2>/dev/null || true
 	if pfctl -nf "$PFCONF" 2>/dev/null; then
 		pfctl -f "$PFCONF"
-		msg "pf reloaded"
+		msg "pf reloaded from the restored ruleset"
 	else
-		warn "restored pf.conf does not parse; disabling pf instead"
+		warn "the restored pf.conf does not parse; disabling pf outright"
 		pfctl -d 2>/dev/null || true
 	fi
+}
+
+if [ "$REVERT" -eq 1 ]; then
+	do_revert
 	msg "done"
 	exit 0
 fi
+
+# Run a command with a deadline: ftp(1) has no timeout of its own, and a
+# hung fetch would leave the verification waiting forever.
+with_timeout() {   # <seconds> <command...>
+	_t="$1"; shift
+	"$@" &
+	_cmd=$!
+	( sleep "$_t"; kill -9 "$_cmd" 2>/dev/null ) >/dev/null 2>&1 &
+	_watch=$!
+	_rc=0
+	wait "$_cmd" 2>/dev/null || _rc=$?
+	kill -9 "$_watch" 2>/dev/null || true
+	return "$_rc"
+}
 
 # --------------------------------------------------------------- detect LAN --
 
@@ -339,24 +359,85 @@ msg "loading the pf ruleset"
 pfctl -f "$PFCONF"
 pfctl -e 2>/dev/null || true
 
+# ------------------------------------------------------------------ verify ----
+#
+# Everything is in place; now prove it actually works.  Tor takes a while
+# to build its first circuit, so this retries rather than testing once.
+# check.torproject.org answers with IsTor true or false, which is the only
+# check that distinguishes "working" from "reaching the internet the wrong
+# way round".
+
+CHECK_URL="https://check.torproject.org/api/ip"
+CHECK_TMP="/tmp/torcheck.$$"
+
+fetch_check() {
+	http_proxy="http://127.0.0.1:$HTTP_PORT/" \
+	https_proxy="http://127.0.0.1:$HTTP_PORT/" \
+	with_timeout 25 ftp -V -o "$CHECK_TMP" "$CHECK_URL" >/dev/null 2>&1
+}
+
+verify() {
+	i=0
+	while [ "$i" -lt 12 ]; do
+		if fetch_check; then
+			if grep -q '"IsTor":true' "$CHECK_TMP" 2>/dev/null; then
+				return 0
+			fi
+			if grep -q '"IsTor":false' "$CHECK_TMP" 2>/dev/null; then
+				return 2      # reached the internet, but not via Tor
+			fi
+		fi
+		i=$((i + 1))
+		msg "  waiting for Tor to build a circuit (${i}0s)"
+		sleep 10
+	done
+	return 1
+}
+
+msg "checking that traffic really is going through Tor"
+VERIFY_RC=0
+verify || VERIFY_RC=$?
+rm -f "$CHECK_TMP"
+
+if [ "$VERIFY_RC" -ne 0 ]; then
+	case "$VERIFY_RC" in
+	2) warn "the machine reached the internet, but NOT through Tor." ;;
+	*) warn "could not confirm Tor is carrying traffic after two minutes." ;;
+	esac
+	warn "Last lines of the daemon log:"
+	tail -n 15 /var/log/daemon >&2 2>/dev/null || true
+	if [ "$KEEP_ON_FAIL" -eq 1 ]; then
+		warn "-K given, so the changes are being kept. Undo with: $PROG -r"
+		exit 1
+	fi
+	do_revert
+	die "verification failed, so everything has been put back"
+fi
+
+msg "confirmed: the exit address is a Tor node"
+
+# DNS is a nice-to-have rather than a pass condition -- torsocks and a
+# SOCKS-configured browser resolve through Tor without it.
+if getent hosts example.com >/dev/null 2>&1; then
+	msg "system name resolution works"
+else
+	warn "system name resolution does not work; use torsocks for anything"
+	warn "  that needs to resolve a name outside a SOCKS-aware program"
+fi
+
 cat <<EOF
 
-Done.  Verify before trusting it.
+Done, and checked: check.torproject.org confirmed the exit is a Tor node.
 
-  1. Nothing should leave outside Tor.  This should stay silent:
+Worth watching yourself as well:
+
+  nothing should leave outside Tor -- this should stay silent:
 
          doas tcpdump -ni $EGRESS_IF not tcp and not port 67 and not port 68
 
-  2. Watch what pf drops, if something stops working:
+  what pf is dropping, when something stops working:
 
          doas tcpdump -ni pflog0
-
-  3. Confirm the exit node:
-
-         ftp -o - https://check.torproject.org/api/ip
-
-     (that works because \$http_proxy now points at Tor's HTTP tunnel;
-      open a new shell first so /etc/profile is read)
 
 Pointing programs at Tor:
 
